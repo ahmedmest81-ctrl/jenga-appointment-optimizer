@@ -1,0 +1,259 @@
+# Jenga Appointment Optimization System Configuration
+# Production Configuration Template
+
+system:
+  version: "1.0.0"
+  environment: "development"  # production|staging|development
+
+# Database Configuration
+database:
+  pool_size: 10
+  max_overflow: 20
+  pool_pre_ping: true
+  connection_timeout: 30
+  echo_queries: false
+
+# Core Engine Configuration
+engine:
+  appointment_window_days: 30  # Default booking window
+
+  cascade:
+    max_depth: 10  # Maximum cascade optimization depth (resolved from 5 vs 10 conflict)
+    shift_offer_expiry_minutes: 30  # How long clients have to accept shift offers
+    enable_proactive_cascade: false  # Proactively optimize without cancellations
+
+  # Time Window Behavior (clinic-grade appointment compression)
+  # Defines how Jenga behaves based on how far in the future an open slot is
+  time_windows:
+    # Long-term: No immediate cascade, notify wishlist/later patients
+    long_term_days: 14  # >= 14 days out
+    long_term_action: "notify"  # notify | offer | auto_move
+
+    # Medium-term: Offer earlier slots to candidates
+    medium_term_days: 7  # >= 7 days out (but < long_term)
+    medium_term_action: "offer"  # notify | offer | auto_move
+    medium_term_offer_expiry_hours: 24  # How long offers last in medium-term
+
+    # Short-term: Urgent - use business policy
+    short_term_hours: 48  # < 48 hours
+    short_term_action: "auto_move"  # notify | offer | auto_move
+    short_term_offer_expiry_minutes: 30  # Short expiry for urgent offers
+
+  # Consent Policy (per-business override possible)
+  consent:
+    require_consent_for_moves: false  # true = always offer, never auto-move
+    vip_always_offer: true  # VIP clients always get offers, never auto-moved
+    max_offers_per_slot: 3  # Max candidates to offer before giving up
+    offer_timeout_action: "next_candidate"  # next_candidate | abandon
+
+# Scheduler Configuration
+scheduler:
+  enabled: false
+  daily_optimization_hour: 2  # Run optimization at 2 AM (resolved from 2 AM vs 6 AM conflict)
+  daily_optimization_minute: 0
+  reminder_check_interval_hours: 1  # Check for reminders every hour
+  auto_confirmation_interval_hours: 1  # Check for auto-confirmations every hour
+  google_calendar_sync_minutes: 5  # Sync Google Calendar every 5 minutes
+
+# Notification Configuration
+notifications:
+  reminders:
+    seven_day_hours: 168  # 7 days before appointment
+    forty_eight_hour_hours: 48  # 48 hours before appointment
+    auto_confirm_hours: 24  # Auto-confirm 24 hours before
+    window_buffer_hours: 1  # ±1 hour window for sending reminders
+
+  channels:
+    fallback_order: ["sms", "email", "whatsapp"]  # Channel fallback priority
+    retry_attempts: 3
+    retry_delay_seconds: 300  # 5 minutes between retries
+
+# Machine Learning Engine Configuration
+ml:
+  version: "v2.0"
+
+  # Feature Weights (must sum to ~1.0)
+  weights:
+    day_of_week: 0.15
+    time_bucket: 0.15
+    client_history: 0.25
+    appointment_type: 0.10
+    segment: 0.15
+    days_until: 0.10
+    weather: 0.05
+    move_history: 0.05
+
+  # Risk Thresholds
+  risk_thresholds:
+    high: 0.7  # >= 0.7 is high risk
+    medium: 0.4  # >= 0.4 is medium risk
+    low: 0.0  # < 0.4 is low risk
+
+  # Day of Week Risk Scores (0=Monday, 6=Sunday)
+  day_of_week_risk:
+    monday: 0.35
+    tuesday: 0.30
+    wednesday: 0.28
+    thursday: 0.32
+    friday: 0.45
+    saturday: 0.55
+    sunday: 0.60
+
+  # Time Bucket Risk Scores
+  time_bucket_risk:
+    early_morning: 0.50  # 6am-9am
+    morning: 0.35        # 9am-12pm
+    afternoon: 0.30      # 12pm-4pm
+    late_afternoon: 0.40 # 4pm-6pm
+    evening: 0.55        # 6pm-9pm
+
+  # Time Bucket Boundaries (24-hour format)
+  time_buckets:
+    early_morning_start: 6
+    early_morning_end: 9
+    morning_start: 9
+    morning_end: 12
+    afternoon_start: 12
+    afternoon_end: 16
+    late_afternoon_start: 16
+    late_afternoon_end: 18
+    evening_start: 18
+    evening_end: 21
+
+  # Client Segment Risk Scores
+  segment_risk:
+    vip: 0.15
+    regular: 0.35
+    new: 0.55
+    high_risk: 0.75
+
+  # Appointment Type Risk Scores
+  appointment_type_risk:
+    routine: 0.35
+    follow_up: 0.25
+    consultation: 0.40
+    procedure: 0.20
+    emergency: 0.15
+    default: 0.35  # For unknown types
+
+  # Days Until Appointment Risk
+  days_until_risk:
+    very_close_threshold: 2  # < 2 days
+    very_close_risk: 0.60
+    close_threshold: 7  # < 7 days
+    close_risk: 0.30
+    medium_threshold: 14  # < 14 days
+    medium_risk: 0.35
+    far_threshold: 30  # < 30 days
+    far_risk: 0.40
+    very_far_risk: 0.50  # >= 30 days
+
+  # Move History Risk Penalty
+  move_penalty:
+    zero_moves: 0.0
+    one_move: 0.1
+    two_moves: 0.2
+    three_plus_moves: 0.3
+
+  # Client History Risk Calculation
+  client_history:
+    min_appointments_threshold: 3  # Clients with < 3 appointments are "new"
+    blend_factor: 0.5  # Blend with neutral risk for new clients
+    neutral_risk: 0.5
+    no_show_weight: 0.7  # Weight for no-shows in history calculation
+    cancellation_weight: 0.3  # Weight for cancellations
+
+  # Flexibility Scoring (for cascade candidates)
+  flexibility:
+    base_score: 1.0
+    vip_multiplier: 0.3  # VIPs less flexible
+    high_risk_multiplier: 0.7  # High-risk clients less flexible
+    regular_multiplier: 1.0
+    flexible_client_multiplier: 1.2  # Boost for clients marked flexible
+    inflexible_penalty: 0.5  # Penalty for clients marked inflexible
+    move_decay_rate: 0.5  # Exponential decay: exp(-0.5 * move_count)
+
+# API Configuration
+api:
+  prefix: "/api/v1"
+  key_header: "X-API-Key"
+  rate_limit_per_minute: 60
+  request_timeout_seconds: 30
+  default_page_size: 100
+
+# Validation Rules
+validation:
+  appointment:
+    min_duration_minutes: 15
+    max_duration_minutes: 480  # 8 hours
+    max_future_days: 365  # Can't book more than 1 year ahead
+    min_advance_hours: 1  # Must book at least 1 hour in advance
+    require_provider_id: false  # Set true to require provider for all appointments
+
+  client:
+    min_name_length: 2
+    max_name_length: 255
+    require_email_or_phone: true  # At least one contact method required
+
+  business:
+    min_name_length: 2
+    max_name_length: 255
+    min_appointment_window_days: 7
+    max_appointment_window_days: 180
+
+  risk_score:
+    min_value: 0.0
+    max_value: 1.0
+
+# Client Segment Configuration
+client_segments:
+  high_risk_threshold: 0.3  # No-show rate > 30% triggers HIGH_RISK segment
+
+# Business Hours (for validation - per-business overrides in DB)
+business_hours:
+  enabled: false  # Global enforcement disabled by default
+  default_timezone: "UTC"
+  monday:
+    start: "09:00"
+    end: "17:00"
+    enabled: true
+  tuesday:
+    start: "09:00"
+    end: "17:00"
+    enabled: true
+  wednesday:
+    start: "09:00"
+    end: "17:00"
+    enabled: true
+  thursday:
+    start: "09:00"
+    end: "17:00"
+    enabled: true
+  friday:
+    start: "09:00"
+    end: "17:00"
+    enabled: true
+  saturday:
+    start: "10:00"
+    end: "14:00"
+    enabled: false
+  sunday:
+    start: "00:00"
+    end: "00:00"
+    enabled: false
+
+# Logging Configuration
+logging:
+  level: "INFO"  # DEBUG|INFO|WARNING|ERROR|CRITICAL
+  format: "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+  file_enabled: false
+  file_path: "logs/jenga.log"
+
+# Feature Flags
+features:
+  enable_cascade_optimization: true
+  enable_risk_scoring: true
+  enable_notifications: false
+  enable_google_calendar_sync: false
+  enable_auto_confirmation: false
+  enable_proactive_cascade: false  # Future feature
