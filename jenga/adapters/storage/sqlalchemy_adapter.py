@@ -13,6 +13,7 @@ The core remains cloud-neutral; only this adapter knows about SQLAlchemy.
 
 from typing import List, Dict, Any, Optional
 from datetime import datetime, timedelta
+from jenga.core.time_utils import utc_now
 from sqlalchemy.orm import Session
 from sqlalchemy import and_
 
@@ -135,7 +136,7 @@ class SQLAlchemyWorkflowRepository:
         appointment.no_show_risk = workflow.risk_score
         appointment.is_movable = workflow.is_movable
         appointment.move_count = workflow.move_count
-        appointment.updated_at = datetime.utcnow()
+        appointment.updated_at = utc_now()
 
         self._db.flush()
         return self._to_workflow(appointment)
@@ -276,23 +277,76 @@ class SQLAlchemyWorkflowRepository:
     def update_time(
         self,
         workflow_id: int,
-        new_time: datetime
+        new_time: datetime,
+        business_id: int
     ) -> WorkflowInstance:
-        """Update workflow appointment time (for cascade moves)."""
+        """Update workflow appointment time (for cascade moves).
+
+        Tenant-scoped: the business_id filter guarantees this method can
+        never mutate another tenant's appointment, regardless of caller bugs.
+        """
         appointment = self._db.query(Appointment).filter(
-            Appointment.id == workflow_id
+            Appointment.id == workflow_id,
+            Appointment.business_id == business_id
         ).first()
 
         if appointment is None:
-            raise ValueError(f"Workflow {workflow_id} not found")
+            raise ValueError(
+                f"Workflow {workflow_id} not found for business {business_id}"
+            )
 
         appointment.appointment_time = new_time
         appointment.move_count = (appointment.move_count or 0) + 1
-        appointment.last_moved_at = datetime.utcnow()
-        appointment.updated_at = datetime.utcnow()
+        appointment.last_moved_at = utc_now()
+        appointment.updated_at = utc_now()
 
         self._db.flush()
         return self._to_workflow(appointment)
+
+    def get_conflicting_workflows(
+        self,
+        business_id: int,
+        start_time: datetime,
+        duration_minutes: int,
+        exclude_workflow_id=None
+    ):
+        """
+        Active appointments overlapping [start_time, start_time + duration).
+
+        Overlap rule: existing.start < new.end AND existing.end > new.start.
+        The end time is derived from duration in Python for cross-database
+        portability (SQLite cannot add minutes to a column in a filter), so we
+        pre-filter by a conservative window and finish the check in Python.
+        """
+        from datetime import timedelta
+
+        new_end = start_time + timedelta(minutes=duration_minutes)
+        # No appointment longer than 24h; conservative pre-filter window.
+        window_start = start_time - timedelta(hours=24)
+
+        terminal_statuses = [
+            AppointmentStatus.CANCELLED,
+            AppointmentStatus.COMPLETED,
+            AppointmentStatus.NO_SHOW
+        ]
+
+        query = self._db.query(Appointment).filter(
+            Appointment.business_id == business_id,
+            Appointment.appointment_time < new_end,
+            Appointment.appointment_time > window_start,
+            ~Appointment.status.in_(terminal_statuses)
+        )
+        if exclude_workflow_id is not None:
+            query = query.filter(Appointment.id != exclude_workflow_id)
+
+        conflicts = []
+        for appointment in query.all():
+            existing_end = appointment.appointment_time + timedelta(
+                minutes=appointment.duration_minutes or 0
+            )
+            if existing_end > start_time:
+                conflicts.append(self._to_workflow(appointment))
+        return conflicts
 
     def record_cascade(
         self,
@@ -418,7 +472,7 @@ class SQLAlchemyClientRepository:
             client.no_show_rate = 0.0
             client.cancellation_rate = 0.0
 
-        client.updated_at = datetime.utcnow()
+        client.updated_at = utc_now()
         self._db.flush()
 
     def update_stats_on_completion(self, client_id: int) -> None:
@@ -660,6 +714,18 @@ class SQLAlchemyOfferRepository:
             ShiftOffer.expires_at < current_time
         ).all()
 
+        return [self._to_offer(so) for so in shift_offers]
+
+    def get_offers_for_trigger(
+        self,
+        trigger_workflow_id: int,
+        business_id: int
+    ) -> List[Offer]:
+        """All offers (any status) created for a given cancelled slot."""
+        shift_offers = self._db.query(ShiftOffer).filter(
+            ShiftOffer.business_id == business_id,
+            ShiftOffer.trigger_workflow_id == trigger_workflow_id
+        ).all()
         return [self._to_offer(so) for so in shift_offers]
 
 

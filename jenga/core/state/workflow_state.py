@@ -11,6 +11,8 @@ Deterministic: Same input always produces same output.
 from enum import Enum
 from typing import Set, Dict, Optional
 from datetime import datetime, timedelta
+
+from jenga.core.time_utils import ensure_naive_utc, utc_now
 from dataclasses import dataclass
 
 
@@ -213,8 +215,8 @@ class TemporalValidator:
         current_time: Optional[datetime] = None
     ) -> None:
         """Ensure appointment is not in the past."""
-        if current_time is None:
-            current_time = datetime.utcnow()
+        current_time = ensure_naive_utc(current_time) if current_time else utc_now()
+        appointment_time = ensure_naive_utc(appointment_time)
 
         earliest = current_time + timedelta(hours=self.min_advance_hours)
         if appointment_time < earliest:
@@ -230,8 +232,8 @@ class TemporalValidator:
         current_time: Optional[datetime] = None
     ) -> None:
         """Ensure appointment is within booking window."""
-        if current_time is None:
-            current_time = datetime.utcnow()
+        current_time = ensure_naive_utc(current_time) if current_time else utc_now()
+        appointment_time = ensure_naive_utc(appointment_time)
 
         effective_window = min(window_days, self.max_future_days)
         max_time = current_time + timedelta(days=effective_window)

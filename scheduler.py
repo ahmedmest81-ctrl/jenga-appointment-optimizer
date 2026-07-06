@@ -14,6 +14,7 @@ from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.interval import IntervalTrigger
 from datetime import datetime, timedelta
+from jenga.core.time_utils import utc_now
 from sqlalchemy.orm import Session
 from sqlalchemy import and_
 import logging
@@ -171,7 +172,7 @@ class JengaScheduler:
                         event_data={
                             "appointments_processed": appointments_processed,
                             "high_risk_count": len(risky),
-                            "timestamp": datetime.utcnow().isoformat()
+                            "timestamp": utc_now().isoformat()
                         }
                     )
 
@@ -201,10 +202,10 @@ class JengaScheduler:
 
             # 7-day reminders
             seven_day_hours = self.config.notifications.reminders.seven_day_hours
-            seven_day_window_start = datetime.utcnow() + timedelta(
+            seven_day_window_start = utc_now() + timedelta(
                 hours=seven_day_hours - 1
             )
-            seven_day_window_end = datetime.utcnow() + timedelta(
+            seven_day_window_end = utc_now() + timedelta(
                 hours=seven_day_hours + 1
             )
 
@@ -241,10 +242,10 @@ class JengaScheduler:
 
             # 48-hour reminders
             forty_eight_hours = self.config.notifications.reminders.forty_eight_hour_hours
-            forty_eight_window_start = datetime.utcnow() + timedelta(
+            forty_eight_window_start = utc_now() + timedelta(
                 hours=forty_eight_hours - 1
             )
-            forty_eight_window_end = datetime.utcnow() + timedelta(
+            forty_eight_window_end = utc_now() + timedelta(
                 hours=forty_eight_hours + 1
             )
 
@@ -294,10 +295,10 @@ class JengaScheduler:
 
             # 24-hour window
             auto_confirm_hours = self.config.notifications.reminders.auto_confirm_hours
-            confirm_window_start = datetime.utcnow() + timedelta(
+            confirm_window_start = utc_now() + timedelta(
                 hours=auto_confirm_hours - 1
             )
-            confirm_window_end = datetime.utcnow() + timedelta(
+            confirm_window_end = utc_now() + timedelta(
                 hours=auto_confirm_hours + 1
             )
 
@@ -325,7 +326,7 @@ class JengaScheduler:
                         event_type="appointment.auto_confirmed",
                         appointment_id=appointment.id,
                         event_data={
-                            "confirmed_at": datetime.utcnow().isoformat(),
+                            "confirmed_at": utc_now().isoformat(),
                             "notification_success": status.value == "success"
                         }
                     )

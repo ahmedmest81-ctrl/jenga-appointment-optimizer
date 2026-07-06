@@ -192,7 +192,31 @@ class InMemoryWorkflowRepository:
             candidates.append(wf)
         return sorted(candidates, key=lambda x: (-x.risk_score, x.appointment_time))[:50]
 
-    def update_time(self, workflow_id: int, new_time: datetime) -> WorkflowInstance:
+    def get_conflicting_workflows(
+        self,
+        business_id: int,
+        start_time: datetime,
+        duration_minutes: int,
+        exclude_workflow_id=None,
+    ):
+        from datetime import timedelta
+        new_end = start_time + timedelta(minutes=duration_minutes)
+        conflicts = []
+        for workflow in self._workflows.values():
+            if workflow.business_id != business_id:
+                continue
+            if workflow.status not in (WorkflowStatus.SCHEDULED, WorkflowStatus.CONFIRMED):
+                continue
+            if exclude_workflow_id is not None and workflow.id == exclude_workflow_id:
+                continue
+            existing_end = workflow.appointment_time + timedelta(
+                minutes=workflow.duration_minutes
+            )
+            if workflow.appointment_time < new_end and existing_end > start_time:
+                conflicts.append(workflow)
+        return conflicts
+
+    def update_time(self, workflow_id: int, new_time: datetime, business_id: int = None) -> WorkflowInstance:
         wf = self._workflows.get(workflow_id)
         if wf is None:
             raise ValueError(f"Workflow {workflow_id} not found")
@@ -315,6 +339,21 @@ class InMemoryOfferRepository:
         )
         self._offers[offer_id] = updated
         return updated
+
+    def get_expired_offers(self, business_id: int, current_time: datetime):
+        return [
+            offer for offer in self._offers.values()
+            if offer.business_id == business_id
+            and offer.status == "offered"
+            and offer.expires_at < current_time
+        ]
+
+    def get_offers_for_trigger(self, trigger_workflow_id: int, business_id: int):
+        return [
+            offer for offer in self._offers.values()
+            if offer.business_id == business_id
+            and offer.trigger_workflow_id == trigger_workflow_id
+        ]
 
     def count_offers_for_slot(
         self, slot_time: datetime, business_id: int, trigger_workflow_id: int

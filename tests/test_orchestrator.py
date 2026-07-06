@@ -38,7 +38,28 @@ class InMemoryWorkflowRepository:
             and workflow.risk_score >= min_risk
         ]
 
-    def update_time(self, workflow_id: int, new_time: datetime):
+    def get_conflicting_workflows(
+        self,
+        business_id: int,
+        start_time: datetime,
+        duration_minutes: int,
+        exclude_workflow_id=None,
+    ):
+        new_end = start_time + timedelta(minutes=duration_minutes)
+        conflicts = []
+        for workflow in self.workflows.values():
+            if workflow.business_id != business_id or not workflow.is_active:
+                continue
+            if exclude_workflow_id is not None and workflow.id == exclude_workflow_id:
+                continue
+            existing_end = workflow.appointment_time + timedelta(
+                minutes=workflow.duration_minutes
+            )
+            if workflow.appointment_time < new_end and existing_end > start_time:
+                conflicts.append(workflow)
+        return conflicts
+
+    def update_time(self, workflow_id: int, new_time: datetime, business_id: int = None):
         current = self.workflows[workflow_id]
         updated = replace(
             current,

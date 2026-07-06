@@ -12,6 +12,8 @@ Cloud-neutral: No external dependencies.
 
 from dataclasses import dataclass, field
 from datetime import datetime
+
+from jenga.core.time_utils import utc_now
 from typing import Optional, Dict, Any
 from enum import Enum
 import uuid
@@ -60,7 +62,7 @@ class DomainEvent:
     All events flow through the orchestrator.
     """
     event_id: str = field(default_factory=lambda: str(uuid.uuid4()))
-    timestamp: datetime = field(default_factory=datetime.utcnow)
+    timestamp: datetime = field(default_factory=utc_now)
     event_type: EventType = EventType.WORKFLOW_CREATED
     aggregate_id: Optional[int] = None  # workflow/appointment ID
     business_id: Optional[int] = None

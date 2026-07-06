@@ -15,6 +15,7 @@ The API layer handles HTTP concerns; the orchestrator handles business logic.
 
 from typing import Dict, Any, Optional, List
 from datetime import datetime
+from jenga.core.time_utils import utc_now
 from dataclasses import dataclass
 from enum import Enum
 import logging
@@ -420,7 +421,7 @@ class FastAPIOrchestrationAdapter:
                 "confidence": 0.0,
                 "factors": {},
                 "model_version": "none",
-                "calculated_at": datetime.utcnow().isoformat()
+                "calculated_at": utc_now().isoformat()
             }
 
     # ===== Offer Handling Methods =====

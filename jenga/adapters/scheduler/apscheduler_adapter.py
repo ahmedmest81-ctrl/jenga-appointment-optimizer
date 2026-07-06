@@ -37,6 +37,7 @@ from jenga.core.orchestration.orchestrator import Orchestrator
 from jenga.core.decisions.decision_gateway import DecisionGateway
 from jenga.advisory.ml_advisor import MLRiskAdvisor, create_advisor_from_config
 from jenga.adapters.storage.sqlalchemy_adapter import (
+    SQLAlchemyOfferRepository,
     SQLAlchemyWorkflowRepository,
     SQLAlchemyClientRepository,
     SQLAlchemyEventLogger,
@@ -75,6 +76,7 @@ class SchedulerAdapter:
         """Create orchestrator with current database session."""
         workflow_repo = SQLAlchemyWorkflowRepository(db)
         client_repo = SQLAlchemyClientRepository(db)
+        offer_repo = SQLAlchemyOfferRepository(db)
 
         # Create ML advisor if enabled
         advisor = None
@@ -92,7 +94,10 @@ class SchedulerAdapter:
         return Orchestrator(
             workflow_repository=workflow_repo,
             client_repository=client_repo,
-            decision_gateway=gateway
+            decision_gateway=gateway,
+            offer_repository=offer_repo,
+            time_window_config=self._config.get("time_windows", {}),
+            consent_config=self._config.get("consent", {})
         )
 
     def start(self) -> None:
@@ -159,6 +164,23 @@ class SchedulerAdapter:
                 f"{self._scheduler_config.get('google_calendar_sync_minutes', 15)} minutes"
             )
 
+        # Offer expiry processing (closes the offer-flow loop: expired
+        # offers are marked and the cascade continues to the next candidate)
+        if self._features.get("enable_offer_expiry", True):
+            self._scheduler.add_job(
+                func=self._trigger_offer_expiry,
+                trigger=IntervalTrigger(
+                    minutes=self._scheduler_config.get("offer_expiry_check_minutes", 5)
+                ),
+                id="process_offer_expiry",
+                name="Process Expired Offers",
+                replace_existing=True
+            )
+            logger.info(
+                f"Scheduled offer expiry processing every "
+                f"{self._scheduler_config.get('offer_expiry_check_minutes', 5)} minutes"
+            )
+
         self._scheduler.start()
         self._started = True
         logger.info("Scheduler adapter started")
@@ -190,13 +212,16 @@ class SchedulerAdapter:
                     # Trigger risk recalculation
                     result = orchestrator.recalculate_risk_scores(business.id)
                     if result.success:
-                        total_processed += result.data.get("updated_count", 0)
+                        # BUGFIX: ExecutionResult has 'metadata', not 'data' -
+                        # the old attribute access crashed this job at runtime.
+                        total_processed += result.metadata.get("updated_count", 0)
 
                     # Trigger optimization (cascade evaluation)
                     opt_result = orchestrator.run_optimization(business.id)
 
                     logger.info(
-                        f"Business {business.id}: {result.data.get('updated_count', 0)} "
+                        f"Business {business.id}: "
+                        f"{result.metadata.get('updated_count', 0)} "
                         f"risks updated, optimization: {opt_result.success}"
                     )
 
@@ -213,6 +238,42 @@ class SchedulerAdapter:
             f"Daily optimization complete: {total_processed} workflows, "
             f"{duration:.2f}ms"
         )
+
+    def _trigger_offer_expiry(self) -> None:
+        """
+        Expire overdue offers and continue cascades to the next candidate.
+
+        This is a TRIGGER - all business logic lives in
+        Orchestrator.process_expired_offers.
+        """
+        logger.info("Triggering offer expiry processing")
+
+        with get_db_context() as db:
+            businesses = db.query(Business).filter(Business.is_active == True).all()
+
+            total_expired = 0
+            total_continued = 0
+            for business in businesses:
+                try:
+                    orchestrator = self._create_orchestrator(db)
+                    result = orchestrator.process_expired_offers(business.id)
+                    if result.success:
+                        total_expired += result.metadata.get("expired_count", 0)
+                        total_continued += result.metadata.get("cascades_continued", 0)
+                except Exception as e:
+                    logger.error(
+                        f"Error processing expired offers for business "
+                        f"{business.id}: {e}",
+                        exc_info=True
+                    )
+
+            db.commit()
+
+        if total_expired:
+            logger.info(
+                f"Offer expiry complete: {total_expired} expired, "
+                f"{total_continued} cascades continued"
+            )
 
     def _trigger_reminders(self) -> None:
         """

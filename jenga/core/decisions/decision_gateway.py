@@ -15,6 +15,8 @@ Cloud-neutral: No ML framework dependencies in core.
 from dataclasses import dataclass
 from typing import List, Optional, Dict, Any, Protocol
 from datetime import datetime
+
+from jenga.core.time_utils import ensure_naive_utc, utc_now
 from enum import Enum
 
 from jenga.core.state.workflow_state import WorkflowInstance, WorkflowStatus
@@ -151,6 +153,11 @@ class DecisionGateway:
         self._medium_risk_threshold = medium_risk_threshold
         self._max_cascade_depth = max_cascade_depth
 
+    @property
+    def max_cascade_depth(self) -> int:
+        """Public read access for orchestration (no private attribute reach-in)."""
+        return self._max_cascade_depth
+
     def set_risk_advisor(self, advisor: RiskAdvisor) -> None:
         """Set or replace the risk advisor (for testing/configuration)"""
         self._risk_advisor = advisor
@@ -175,7 +182,7 @@ class DecisionGateway:
                 confidence=0.0,
                 factors={},
                 model_version="none",
-                calculated_at=datetime.utcnow()
+                calculated_at=utc_now()
             )
 
         assessment = self._risk_advisor.assess_risk(workflow, client_data)
@@ -281,4 +288,4 @@ class DecisionGateway:
         Business rule: Only trigger cascade if there's time value
         to recover (appointment is in the future).
         """
-        return cancelled_workflow.appointment_time > datetime.utcnow()
+        return ensure_naive_utc(cancelled_workflow.appointment_time) > utc_now()

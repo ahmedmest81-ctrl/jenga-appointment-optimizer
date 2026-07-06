@@ -22,6 +22,7 @@ Notification offsets (default):
 
 import logging
 from datetime import datetime, timedelta
+from jenga.core.time_utils import utc_now
 from typing import Dict, List, Optional, Set
 from dataclasses import dataclass, field
 from enum import Enum
@@ -71,7 +72,7 @@ class ScheduledNotification:
     notification_type: NotificationType
     scheduled_for: datetime  # When to send
     appointment_time: datetime  # The actual appointment time
-    created_at: datetime = field(default_factory=datetime.utcnow)
+    created_at: datetime = field(default_factory=utc_now)
 
     def to_dict(self) -> Dict:
         return {
@@ -161,7 +162,7 @@ class NotificationScheduler:
         notification_type: NotificationType
     ) -> str:
         """Generate unique notification ID."""
-        return f"{workflow_id}_{notification_type.value}_{datetime.utcnow().timestamp()}"
+        return f"{workflow_id}_{notification_type.value}_{utc_now().timestamp()}"
 
     def _on_workflow_created(self, event: DomainEvent) -> None:
         """
@@ -257,7 +258,7 @@ class NotificationScheduler:
             List of scheduled notifications
         """
         scheduled = []
-        now = datetime.utcnow()
+        now = utc_now()
 
         # 7-day reminder
         reminder_7_day_time = appointment_time - timedelta(hours=self._reminder_7_day_hours)
@@ -343,7 +344,7 @@ class NotificationScheduler:
             client_id=event.client_id,
             business_id=event.business_id,
             notification_type=NotificationType.APPOINTMENT_MOVED,
-            scheduled_for=datetime.utcnow(),  # Send now
+            scheduled_for=utc_now(),  # Send now
             appointment_time=event.new_time
         )
 
@@ -411,7 +412,7 @@ class NotificationScheduler:
         Returns:
             List of notifications scheduled for now or earlier
         """
-        return self.get_pending_notifications(before=datetime.utcnow())
+        return self.get_pending_notifications(before=utc_now())
 
 
 # Global notification scheduler instance

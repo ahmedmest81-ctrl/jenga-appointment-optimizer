@@ -44,6 +44,7 @@ from jenga.adapters.storage.sqlalchemy_adapter import (
     SQLAlchemyWorkflowRepository,
     SQLAlchemyClientRepository,
     SQLAlchemyEventLogger,
+    SQLAlchemyOfferRepository,
 )
 from jenga.adapters.api.fastapi_adapter import FastAPIOrchestrationAdapter
 from jenga.adapters.scheduler.apscheduler_adapter import SchedulerAdapter
@@ -197,6 +198,7 @@ class JengaContext:
         workflow_repo = SQLAlchemyWorkflowRepository(db)
         client_repo = SQLAlchemyClientRepository(db)
         event_logger = SQLAlchemyEventLogger(db)
+        offer_repo = SQLAlchemyOfferRepository(db)
 
         # Create decision gateway
         gateway = DecisionGateway(
@@ -206,12 +208,18 @@ class JengaContext:
             max_cascade_depth=self._engine_config.get("max_cascade_depth", 10)
         )
 
-        # Create orchestrator
+        # Create orchestrator.
+        # NOTE: offer_repository, time_window_config and consent_config were
+        # previously NOT wired here, which silently disabled the entire offer
+        # flow in the live API (orchestrator fell back to auto-move defaults).
         orchestrator = Orchestrator(
             workflow_repository=workflow_repo,
             client_repository=client_repo,
             decision_gateway=gateway,
-            temporal_validator=self._temporal_validator
+            temporal_validator=self._temporal_validator,
+            offer_repository=offer_repo,
+            time_window_config=self._config.get("time_windows", {}),
+            consent_config=self._config.get("consent", {})
         )
 
         scope = RequestScope(

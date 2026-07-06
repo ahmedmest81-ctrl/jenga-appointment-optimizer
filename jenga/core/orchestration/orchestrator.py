@@ -21,6 +21,7 @@ from enum import Enum
 import logging
 import uuid
 
+from jenga.core.time_utils import ensure_naive_utc, utc_now
 from jenga.core.state.workflow_state import (
     WorkflowInstance,
     WorkflowStatus,
@@ -98,12 +99,28 @@ class WorkflowRepository(Protocol):
     def update_time(
         self,
         workflow_id: int,
-        new_time: datetime
+        new_time: datetime,
+        business_id: int
     ) -> WorkflowInstance:
         """
         Update workflow appointment time (for cascade moves).
 
-        Increments move_count automatically.
+        Tenant-scoped: business_id is REQUIRED so a repository can never
+        mutate another tenant's workflow. Increments move_count automatically.
+        """
+        ...
+
+    def get_conflicting_workflows(
+        self,
+        business_id: int,
+        start_time: datetime,
+        duration_minutes: int,
+        exclude_workflow_id: Optional[int] = None
+    ) -> List[WorkflowInstance]:
+        """
+        Get active workflows overlapping [start_time, start_time + duration).
+
+        Used to guarantee no move or offer acceptance double-books a slot.
         """
         ...
 
@@ -219,6 +236,22 @@ class OfferRepository(Protocol):
         trigger_workflow_id: int
     ) -> int:
         """Count how many offers have been made for this slot."""
+        ...
+
+    def get_expired_offers(
+        self,
+        business_id: int,
+        current_time: datetime
+    ) -> List["Offer"]:
+        """Get offers past expires_at that are still in 'offered' status."""
+        ...
+
+    def get_offers_for_trigger(
+        self,
+        trigger_workflow_id: int,
+        business_id: int
+    ) -> List["Offer"]:
+        """Get all offers (any status) created for a given cancelled slot."""
         ...
 
 
@@ -350,6 +383,11 @@ class Orchestrator:
         events = []
 
         try:
+            # Normalize to canonical naive UTC (API may send tz-aware times)
+            appointment_time = ensure_naive_utc(appointment_time)
+            if current_time is not None:
+                current_time = ensure_naive_utc(current_time)
+
             # Validate temporal constraints
             self._temporal.validate_not_in_past(appointment_time, current_time)
             self._temporal.validate_within_window(appointment_time, window_days, current_time)
@@ -701,7 +739,8 @@ class Orchestrator:
         cancelled_workflow: WorkflowInstance,
         business_id: int,
         events: List[DomainEvent],
-        current_time: Optional[datetime] = None
+        current_time: Optional[datetime] = None,
+        excluded_workflow_ids: Optional[set] = None
     ) -> Dict[str, Any]:
         """
         Execute cascade optimization after cancellation.
@@ -735,8 +774,8 @@ class Orchestrator:
         - moved_workflow_ids prevents moving same appointment twice
         - Day-based ordering ensures forward progress
         """
-        now = current_time or datetime.utcnow()
-        cancelled_time = cancelled_workflow.appointment_time
+        now = ensure_naive_utc(current_time) if current_time else utc_now()
+        cancelled_time = ensure_naive_utc(cancelled_workflow.appointment_time)
         open_day = cancelled_time.date()
 
         # Classify time window
@@ -767,8 +806,10 @@ class Orchestrator:
 
         # Tracking variables
         cascade_depth = 0
-        max_depth = self._gateway._max_cascade_depth
-        moved_workflow_ids: set = set()
+        max_depth = self._gateway.max_cascade_depth
+        # Seed with workflows already offered/moved for this slot (e.g. after
+        # an offer expired) so the same client is never re-selected.
+        moved_workflow_ids: set = set(excluded_workflow_ids or set())
         total_moves = 0
         offers_created = 0
 
@@ -916,6 +957,20 @@ class Orchestrator:
                     moved_workflow_ids.add(selected_workflow.id)
                     continue
 
+            # DOUBLE-BOOKING GUARD: the target slot must be free.
+            if self._slot_has_conflict(
+                business_id=business_id,
+                start_time=new_time,
+                duration_minutes=selected_workflow.duration_minutes,
+                exclude_workflow_id=selected_workflow.id
+            ):
+                logger.info(
+                    f"Cascade skipping workflow {selected_workflow.id}: "
+                    f"target slot {new_time} is occupied"
+                )
+                moved_workflow_ids.add(selected_workflow.id)
+                continue
+
             # AUTO-MOVE: Execute the move directly
             logger.info(
                 f"Cascade move: workflow {selected_workflow.id} "
@@ -926,7 +981,8 @@ class Orchestrator:
             try:
                 updated_workflow = self._workflows.update_time(
                     workflow_id=selected_workflow.id,
-                    new_time=new_time
+                    new_time=new_time,
+                    business_id=business_id
                 )
 
                 # Record cascade in history
@@ -1065,6 +1121,122 @@ class Orchestrator:
 
     # ===== Time Window and Offer Operations =====
 
+    def process_expired_offers(
+        self,
+        business_id: int,
+        current_time: Optional[datetime] = None
+    ) -> ExecutionResult:
+        """
+        Expire overdue offers and, per configuration, continue the cascade.
+
+        This closes the loop the offer flow leaves open: an offer that a
+        client ignores must not silently strand the freed slot. For each
+        expired offer we:
+          1. Mark it 'expired' and emit OfferExpiredEvent.
+          2. If offer_timeout_action == 'next_candidate' and the trigger
+             workflow is known, re-run the cascade for that slot, excluding
+             every workflow that has already received an offer for it, so the
+             next-best candidate gets the offer.
+
+        Designed to be called periodically by a scheduler adapter.
+        """
+        events: List[DomainEvent] = []
+        now = ensure_naive_utc(current_time) if current_time else utc_now()
+
+        if self._offers is None:
+            return ExecutionResult(
+                success=False,
+                workflow=None,
+                events=events,
+                error="Offer repository not configured"
+            )
+
+        expired_offers = self._offers.get_expired_offers(business_id, now)
+        expired_count = 0
+        cascades_continued = 0
+
+        for offer in expired_offers:
+            self._offers.update_offer_status(offer.offer_id, "expired", now)
+            expired_count += 1
+
+            expired_event = OfferExpiredEvent(
+                aggregate_id=offer.workflow_id,
+                business_id=business_id,
+                offer_id=offer.offer_id,
+                workflow_id=offer.workflow_id,
+                client_id=offer.client_id,
+                to_time=offer.to_time
+            )
+            events.append(expired_event)
+            self._event_bus.publish(expired_event)
+            logger.info(f"Expired offer {offer.offer_id} (slot {offer.to_time})")
+
+            if (
+                self._offer_timeout_action == "next_candidate"
+                and offer.trigger_workflow_id is not None
+            ):
+                trigger_workflow = self._workflows.get_by_id(
+                    offer.trigger_workflow_id, business_id
+                )
+                if trigger_workflow is None:
+                    continue
+
+                # Every workflow that already got an offer for this slot is
+                # excluded, so expiry never re-offers to the same client.
+                prior_offers = self._offers.get_offers_for_trigger(
+                    trigger_workflow_id=offer.trigger_workflow_id,
+                    business_id=business_id
+                )
+                excluded = {o.workflow_id for o in prior_offers}
+
+                cascade_result = self._execute_cascade(
+                    cancelled_workflow=trigger_workflow,
+                    business_id=business_id,
+                    events=events,
+                    current_time=now,
+                    excluded_workflow_ids=excluded
+                )
+                if cascade_result.get("offers_created") or cascade_result.get("moves_count"):
+                    cascades_continued += 1
+
+        return ExecutionResult(
+            success=True,
+            workflow=None,
+            events=events,
+            metadata={
+                "expired_count": expired_count,
+                "cascades_continued": cascades_continued
+            }
+        )
+
+    def _slot_has_conflict(
+        self,
+        business_id: int,
+        start_time: datetime,
+        duration_minutes: int,
+        exclude_workflow_id: Optional[int] = None
+    ) -> bool:
+        """
+        True if moving an appointment of the given duration to start_time
+        would overlap any active appointment for this business.
+
+        This is the double-booking guard: EVERY path that changes an
+        appointment's time (cascade auto-move, offer creation, offer
+        acceptance) MUST pass this check first.
+        """
+        conflicts = self._workflows.get_conflicting_workflows(
+            business_id=business_id,
+            start_time=start_time,
+            duration_minutes=duration_minutes,
+            exclude_workflow_id=exclude_workflow_id
+        )
+        if conflicts:
+            logger.info(
+                f"Slot conflict at {start_time} (business {business_id}): "
+                f"overlaps workflows {[w.id for w in conflicts]}"
+            )
+        return bool(conflicts)
+
     def _classify_time_window(
         self,
         slot_time: datetime,
@@ -1080,8 +1252,8 @@ class Orchestrator:
         Returns:
             TimeWindow classification (SHORT_TERM, MEDIUM_TERM, or LONG_TERM)
         """
-        now = current_time or datetime.utcnow()
-        time_until = slot_time - now
+        now = ensure_naive_utc(current_time) if current_time else utc_now()
+        time_until = ensure_naive_utc(slot_time) - now
 
         # Convert to hours for comparison
         hours_until = time_until.total_seconds() / 3600
@@ -1147,7 +1319,7 @@ class Orchestrator:
         Returns:
             Datetime when the offer expires
         """
-        now = current_time or datetime.utcnow()
+        now = current_time or utc_now()
 
         if time_window == TimeWindow.SHORT_TERM:
             return now + timedelta(minutes=self._short_term_offer_expiry_minutes)
@@ -1197,6 +1369,21 @@ class Orchestrator:
                 workflow=None,
                 events=events,
                 error="Long-term slots use notification, not offers"
+            )
+
+        # Don't offer a slot that is no longer free (a direct booking or a
+        # concurrent cascade may have taken it since the cancellation).
+        if self._slot_has_conflict(
+            business_id=business_id,
+            start_time=slot_time,
+            duration_minutes=candidate_workflow.duration_minutes,
+            exclude_workflow_id=candidate_workflow.id
+        ):
+            return ExecutionResult(
+                success=False,
+                workflow=None,
+                events=events,
+                error=f"Slot {slot_time} is no longer available"
             )
 
         # Check max offers per slot
@@ -1299,7 +1486,7 @@ class Orchestrator:
             ExecutionResult with moved workflow
         """
         events = []
-        now = current_time or datetime.utcnow()
+        now = current_time or utc_now()
 
         if self._offers is None:
             return ExecutionResult(
@@ -1320,7 +1507,7 @@ class Orchestrator:
             )
 
         # Check if offer has expired
-        if now > offer.expires_at:
+        if now > ensure_naive_utc(offer.expires_at):
             # Mark as expired and fail
             self._offers.update_offer_status(offer_id, "expired", now)
             return ExecutionResult(
@@ -1349,11 +1536,43 @@ class Orchestrator:
                 error=f"Workflow {offer.workflow_id} not found"
             )
 
+        # STATE GUARD: the appointment must still be active. It may have been
+        # cancelled, completed, or marked no-show since the offer was created.
+        if workflow.status not in (WorkflowStatus.SCHEDULED, WorkflowStatus.CONFIRMED):
+            self._offers.update_offer_status(offer_id, "expired", now)
+            return ExecutionResult(
+                success=False,
+                workflow=None,
+                events=events,
+                error=(
+                    f"Appointment is no longer active "
+                    f"(status: {workflow.status.value}); offer invalidated"
+                )
+            )
+
+        # DOUBLE-BOOKING GUARD: the offered slot must still be free. Another
+        # acceptance, a cascade, or a direct booking may have filled it during
+        # the offer window.
+        if self._slot_has_conflict(
+            business_id=business_id,
+            start_time=offer.to_time,
+            duration_minutes=workflow.duration_minutes,
+            exclude_workflow_id=workflow.id
+        ):
+            self._offers.update_offer_status(offer_id, "expired", now)
+            return ExecutionResult(
+                success=False,
+                workflow=None,
+                events=events,
+                error="Offered slot is no longer available; offer invalidated"
+            )
+
         # Execute the move
         try:
             updated_workflow = self._workflows.update_time(
                 workflow_id=offer.workflow_id,
-                new_time=offer.to_time
+                new_time=offer.to_time,
+                business_id=business_id
             )
 
             # Record cascade if trigger workflow exists
@@ -1370,6 +1589,30 @@ class Orchestrator:
 
             # Update offer status
             self._offers.update_offer_status(offer_id, "accepted", now)
+
+            # SIBLING INVALIDATION: any other active offer for this same slot
+            # must die now, or a second client could accept into an occupied
+            # slot (race -> double booking).
+            siblings = self._offers.get_active_offers_for_slot(
+                slot_time=offer.to_time,
+                business_id=business_id
+            )
+            for sibling in siblings:
+                if sibling.offer_id != offer_id and sibling.status == "offered":
+                    self._offers.update_offer_status(sibling.offer_id, "expired", now)
+                    expired_event = OfferExpiredEvent(
+                        aggregate_id=sibling.workflow_id,
+                        business_id=business_id,
+                        offer_id=sibling.offer_id,
+                        workflow_id=sibling.workflow_id,
+                        client_id=sibling.client_id
+                    )
+                    events.append(expired_event)
+                    self._event_bus.publish(expired_event)
+                    logger.info(
+                        f"Invalidated sibling offer {sibling.offer_id} "
+                        f"for slot {offer.to_time}"
+                    )
 
             # Calculate response time
             # Note: We'd need created_at from offer for accurate timing
@@ -1445,7 +1688,7 @@ class Orchestrator:
             ExecutionResult with decline confirmation
         """
         events = []
-        now = current_time or datetime.utcnow()
+        now = current_time or utc_now()
 
         if self._offers is None:
             return ExecutionResult(
@@ -1535,7 +1778,7 @@ class Orchestrator:
             ExecutionResult with count of expired offers
         """
         events = []
-        now = current_time or datetime.utcnow()
+        now = current_time or utc_now()
         expired_count = 0
 
         if self._offers is None:
@@ -1618,7 +1861,7 @@ class Orchestrator:
             ExecutionResult with notification event
         """
         events = []
-        now = current_time or datetime.utcnow()
+        now = current_time or utc_now()
 
         slot_time = cancelled_workflow.appointment_time
         time_until = slot_time - now

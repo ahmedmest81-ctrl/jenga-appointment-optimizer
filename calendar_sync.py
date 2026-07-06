@@ -16,6 +16,7 @@ Setup Requirements:
 import os
 import logging
 from datetime import datetime, timedelta
+from jenga.core.time_utils import utc_now
 from typing import Optional, List
 from pathlib import Path
 
@@ -119,9 +120,9 @@ def read_google_calendar(db: Session, business_id: Optional[int] = None) -> dict
 
     try:
         # Get events from now to configured window
-        now = datetime.utcnow().isoformat() + 'Z'
+        now = utc_now().isoformat() + 'Z'
         time_max = (
-            datetime.utcnow() +
+            utc_now() +
             timedelta(days=config.engine.appointment_window_days)
         ).isoformat() + 'Z'
 
@@ -235,7 +236,7 @@ def _sync_single_event(db: Session, event: dict, business: Business) -> str:
         # Check if we need to update the time
         if existing.appointment_time != start_time:
             existing.appointment_time = start_time
-            existing.updated_at = datetime.utcnow()
+            existing.updated_at = utc_now()
             logger.info(f"Updated appointment time for event {event_id}")
             return "synced"
         return "skipped"

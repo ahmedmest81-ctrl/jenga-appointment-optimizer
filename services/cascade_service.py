@@ -22,6 +22,7 @@ Handles cascade optimization business logic:
 from sqlalchemy.orm import Session
 from typing import List, Optional
 from datetime import datetime, timedelta
+from jenga.core.time_utils import utc_now
 import logging
 
 from models import Appointment, AppointmentStatus, Client
@@ -116,7 +117,7 @@ class CascadeService:
             days_ahead = self.config.engine.appointment_window_days
 
         # Calculate time window
-        now = datetime.utcnow()
+        now = utc_now()
         end_date = now + timedelta(days=days_ahead)
 
         # Get high-risk threshold from config
@@ -182,7 +183,7 @@ class CascadeService:
 
         results = {
             "business_id": business_id,
-            "timestamp": datetime.utcnow().isoformat(),
+            "timestamp": utc_now().isoformat(),
             "risk_scores_updated": updated_count,
             "total_appointments": len(all_appointments),
             "high_risk_count": high_count,
@@ -233,7 +234,7 @@ class CascadeService:
         # Update appointment
         appointment.no_show_risk = risk_score
         appointment.ml_model_version = self.config.ml.version
-        appointment.risk_calculated_at = datetime.utcnow()
+        appointment.risk_calculated_at = utc_now()
 
         # No need to commit - calling code handles transaction
 
